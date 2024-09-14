@@ -7,7 +7,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, sleep};
 use std::time::{UNIX_EPOCH, SystemTime, Duration};
-use std::sync::atomic::{AtomicI32};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 /// Struct to hold global server state
 struct GlobalServerState {
@@ -19,6 +19,7 @@ struct GlobalServerState {
 }
 
 /// Struct to represent a single connection log
+#[derive(Debug, Clone)]
 struct Log {
     when_opened: i64, // time when a connection opened // i64 since UNIX_EPOCH requires it
     when_closed: i64, // time when it closed
@@ -27,6 +28,7 @@ struct Log {
 }
 
 /// Struct to hold a buffer of logs
+#[derive(Debug)]
 struct LogBuffer {
     log_entries: Vec<Log>, // changed to Vec for dynamic size
     index: i32
@@ -54,14 +56,14 @@ impl Connection {
         let global_state = Arc::new(GlobalServerState {
             listen_thread: Arc::new(AtomicI32::new(0)),
             cli_thread: Arc::new(AtomicI32::new(0)),
-            session_array: Arc::new(Mutex::new(vec![SessionState { timestamp: String::new(), bytes_read: 0, bytes_written: 0 }; 10  ])),
+            session_array: Arc::new(Mutex::new(vec![SessionState { timestamp: String::new(), bytes_read: 0, bytes_written: 0 }; 10])),
             current_session_connections: Arc::new(Mutex::new(vec![String::new(); 10])),
-            history_buffer: Arc::new(Mutex::new(LogBuffer { log_entries: Vec::new(), index: 0 } ))
+            history_buffer: Arc::new(Mutex::new(LogBuffer { log_entries: Vec::new(), index: 0 }))
         });
 
         let accept_thread = {
             let global_state = Arc::clone(&global_state);
-            spawn(move || Self::accept_connections(listener, global_state) )
+            spawn(move || Self::accept_connections(listener, global_state))
         };
 
         // Join the accept_thread to ensure it runs continuously
@@ -100,33 +102,18 @@ impl Connection {
             match reader.read_line(&mut buffer) {
                 Ok(0) => break, // End of stream
                 Ok(_) => {
-                    let request_line = buffer.trim();
-                    let (status_line, filename) = Response::determine_response(request_line);
-
-                    let contents = match read_to_string(&filename) {
-                        Ok(content) => content,
-                        Err(_) => {
-                            let error_response = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
-                            let _ = connection.stream.write_all(error_response.as_bytes());
-                            continue;
-                        }
-                    };
-
-                    let length = contents.len();
-                    let response = format!("{status_line}\r\nContent-Length: {length}\r\n\r\n{contents}");
+                    let request = Request::new(buffer.trim());
+                    let response = Response::generate_response(&request);
 
                     // Write the response
                     if let Err(e) = connection.stream.write_all(response.as_bytes()) {
                         eprintln!("Failed to send response: {}", e);
                         break;
                     }
-                    log_entry.no_of_bytes_sent += length as i32;
+                    log_entry.no_of_bytes_sent += response.len() as i32;
                     log_entry.no_of_bytes_received += buffer.len() as i32;
                 }
-                Err(e) => {
-                //     eprintln!("Error reading line: {}", e);
-                //     break;
-                }
+                Err(e) => eprintln!("Error reading line: {}", e),
             }
         }
 
@@ -149,7 +136,7 @@ impl Connection {
 
     /// Function to get the current time in a suitable format
     fn get_current_time() -> i64 {
-	(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64).try_into().unwrap()
+        (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64).try_into().unwrap()
     }
 }
 
@@ -158,39 +145,57 @@ pub struct Request {
     pub status: String
 }
 
+impl Request {
+    /// Create a new Request from the request line
+    pub fn new(request_line: &str) -> Self {
+        Self {
+            status: request_line.to_string()
+        }
+    }
+}
+
 /// Struct to represent an HTTP response
 pub struct Response {
     pub status: String
 }
 
 impl Response {
-    fn determine_response(request_line: &str) -> (String, String) {
-        match request_line {
-            "GET / HTTP/1.1" => (
-                "HTTP/1.1 200 OK".to_string(),
-                "src/hello.html".to_string()
-            ),
+    /// Generate the HTTP response based on the request
+    fn generate_response(request: &Request) -> String {
+        match request.status.as_str() {
+            "GET / HTTP/1.1" => {
+                let filename = "src/hello.html";
+                let contents = match read_to_string(filename) {
+                    Ok(content) => content,
+                    Err(_) => return "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_string(),
+                };
+                let length = contents.len();
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", length, contents)
+            },
             "GET /slowpage HTTP/1.1" => {
                 sleep(Duration::from_secs(5));
-                (
-                    "HTTP/1.1 200 OK".to_string(),
-                    "src/slowpage.html".to_string()
-                )
+                let filename = "src/slowpage.html";
+                let contents = match read_to_string(filename) {
+                    Ok(content) => content,
+                    Err(_) => return "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_string(),
+                };
+                let length = contents.len();
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", length, contents)
             },
-            _ => (
-                "HTTP/1.1 404 NOT FOUND".to_string(),
-                "src/404.html".to_string()
-            ),
+            _ => {
+                let filename = "src/404.html";
+                let contents = match read_to_string(filename) {
+                    Ok(content) => content,
+                    Err(_) => "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_string(),
+                };
+                let length = contents.len();
+                format!("HTTP/1.1 404 NOT FOUND\r\nContent-Length: {}\r\n\r\n{}", length, contents)
+            }
         }
-    }
-
-    fn stats(status: &str) {
-        println!("Status: {}", status);
     }
 }
 
 /// Main function that starts the server
 fn main() {
-    // Connection::start_server("192.168.0.94", 8080);
     Connection::start_server("localhost", 8080);
 }
