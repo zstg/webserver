@@ -7,9 +7,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, sleep};
 use std::time::{UNIX_EPOCH, SystemTime, Duration};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::AtomicI32;
 
 /// Struct to hold global server state
+#[derive(Debug)]
 struct GlobalServerState {
     listen_thread: Arc<AtomicI32>, // the thread that's currently listening (server-side)
     cli_thread: Arc<AtomicI32>, // the thread associated with the CLI
@@ -53,13 +54,13 @@ impl Connection {
     /// Function to start the server and listen for incoming connections
     pub fn start_server(address: &str, port: u16) {
         let listener = TcpListener::bind(format!("{}:{}", address, port)).unwrap();
-        let global_state = Arc::new(GlobalServerState {
-            listen_thread: Arc::new(AtomicI32::new(0)),
-            cli_thread: Arc::new(AtomicI32::new(0)),
-            session_array: Arc::new(Mutex::new(vec![SessionState { timestamp: String::new(), bytes_read: 0, bytes_written: 0 }; 10])),
-            current_session_connections: Arc::new(Mutex::new(vec![String::new(); 10])),
-            history_buffer: Arc::new(Mutex::new(LogBuffer { log_entries: Vec::new(), index: 0 }))
-        });
+	let global_state = Arc::new(GlobalServerState {
+	    listen_thread: Arc::new(AtomicI32::new(0)),
+	    cli_thread: Arc::new(AtomicI32::new(0)),
+	    session_array: Arc::new(Mutex::new(vec![SessionState { timestamp: String::new(), bytes_read: 0, bytes_written: 0 }; 10])),
+	    current_session_connections: Arc::new(Mutex::new(vec![String::new(); 10])),
+	    history_buffer: Arc::new(Mutex::new(LogBuffer { log_entries: Vec::new(), index: 0 }))
+	});
 
         let accept_thread = {
             let global_state = Arc::clone(&global_state);
@@ -72,18 +73,18 @@ impl Connection {
 
     /// Function to accept incoming connections and spawn a thread for each connection
     fn accept_connections(listener: TcpListener, global_state: Arc<GlobalServerState>) {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let address = format!("{}", stream.peer_addr().unwrap());
-                    let port = stream.peer_addr().unwrap().port();
-                    let connection = Connection { stream, address, port };
-                    let global_state = Arc::clone(&global_state);
-                    spawn(move || Self::handle_connection(connection, global_state));
-                }
-                Err(e) => eprintln!("Failed to accept connection: {}", e),
-            }
-        }
+	for stream in listener.incoming() {
+	    match stream {
+		Ok(stream) => {
+		    let address = format!("{}", stream.peer_addr().unwrap());
+		    let port = stream.peer_addr().unwrap().port();
+		    let connection = Connection { stream, address, port };
+		    let global_state = Arc::clone(&global_state);
+		    spawn(move || Self::handle_connection(connection, global_state));
+		}
+		Err(e) => break, //  eprintln!("Failed to accept connection: {}", e)},
+	    }
+	}
     }
 
     /// Function to handle an individual connection
@@ -107,13 +108,14 @@ impl Connection {
 
                     // Write the response
                     if let Err(e) = connection.stream.write_all(response.as_bytes()) {
-                        eprintln!("Failed to send response: {}", e);
+                        // eprintln!("Failed to send response: {}", e);
                         break;
                     }
                     log_entry.no_of_bytes_sent += response.len() as i32;
                     log_entry.no_of_bytes_received += buffer.len() as i32;
                 }
-                Err(e) => eprintln!("Error reading line: {}", e),
+                // Err(e) => eprintln!("Error reading line: {}", e),
+		Err(e) => break,
             }
         }
 
