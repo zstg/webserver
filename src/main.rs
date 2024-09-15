@@ -2,7 +2,7 @@
 #![allow(unused_variables)]
 
 use std::fs::read_to_string;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Write, stdin};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, sleep};
@@ -61,7 +61,7 @@ impl Connection {
 	    current_session_connections: Arc::new(Mutex::new(vec![String::new(); 10])),
 	    history_buffer: Arc::new(Mutex::new(LogBuffer { log_entries: Vec::new(), index: 0 }))
 	});
-
+        Self::prompt(Arc::clone(&global_state));
         let accept_thread = {
             let global_state = Arc::clone(&global_state);
             spawn(move || Self::accept_connections(listener, global_state))
@@ -71,6 +71,74 @@ impl Connection {
         accept_thread.join().unwrap();
     }
 
+
+    /// Function to provide an administrative prompt
+    fn prompt(global_state: Arc<GlobalServerState>) {
+	println!("Welcome!");
+	loop {
+	    let mut input = String::new();
+	    print!(r">>> ");
+	    Write::flush(&mut std::io::stdout()).unwrap();
+	    stdin().read_line(&mut input).unwrap();
+	    Self::process_inp(input, Arc::clone(&global_state));
+	}
+    }
+
+    fn process_inp(inp: String, global_state: Arc<GlobalServerState>) {
+	match inp.as_str().trim() {
+	    "/exit" | "exit" => std::process::exit(1),
+	    "/status" | "status" => Self::print_status(Arc::clone(&global_state)),
+	    "/hist" | "hist" => Self::print_history(Arc::clone(&global_state)),
+	    _ => {}
+	}
+    }  
+
+    /// Function to print history of connections
+    fn print_history(global_state: Arc<GlobalServerState>) {
+        let history_buffer = global_state.history_buffer.lock().unwrap();
+
+        // Print the history buffer (up to 1024 logs)
+        println!("Connection History (last 1024 logs):");
+        for log in &history_buffer.log_entries {
+            println!(
+                "Connection opened: {}, closed: {}, bytes sent: {}, bytes received: {}",
+                log.when_opened,
+                log.when_closed,
+                log.no_of_bytes_sent,
+                log.no_of_bytes_received
+            );
+        }
+    }
+
+    /// Function to print status of active connections
+    fn print_status(global_state: Arc<GlobalServerState>) {
+        // Obtain the global state
+        let global_state = Arc::clone(&global_state);
+
+        let session_array = global_state.session_array.lock().unwrap();
+        let current_connections = global_state.current_session_connections.lock().unwrap();
+
+        // Calculate the total number of active sessions
+        let active_sessions = current_connections.iter().filter(|conn| !conn.is_empty()).count();
+
+        // Print the server status
+        println!("Server Status:");
+        println!("Active Sessions: {}", active_sessions);
+        
+        let total_bytes_read: i32 = session_array.iter().map(|session| session.bytes_read).sum();
+        let total_bytes_written: i32 = session_array.iter().map(|session| session.bytes_written).sum();
+
+        println!("Total Bytes Sent: {}", total_bytes_written);
+        println!("Total Bytes Received: {}", total_bytes_read);
+
+        println!("Active Connections:");
+        for (i, conn) in current_connections.iter().enumerate() {
+            if !conn.is_empty() {
+                println!("Connection {}: {}", i + 1, conn);
+            }
+        }
+    }
+    
     /// Function to accept incoming connections and spawn a thread for each connection
     fn accept_connections(listener: TcpListener, global_state: Arc<GlobalServerState>) {
 	for stream in listener.incoming() {
@@ -199,5 +267,5 @@ impl Response {
 
 /// Main function that starts the server
 fn main() {
-    Connection::start_server("localhost", 8080);
+    Connection::start_server("192.168.0.94", 8080);
 }
