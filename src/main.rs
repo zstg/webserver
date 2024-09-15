@@ -61,7 +61,7 @@ impl Connection {
 	    current_session_connections: Arc::new(Mutex::new(vec![String::new(); 10])),
 	    history_buffer: Arc::new(Mutex::new(LogBuffer { log_entries: Vec::new(), index: 0 }))
 	});
-        Self::prompt(Arc::clone(&global_state));
+        Self::prompt(&global_state);
         let accept_thread = {
             let global_state = Arc::clone(&global_state);
             spawn(move || Self::accept_connections(listener, global_state))
@@ -73,7 +73,7 @@ impl Connection {
 
 
     /// Function to provide an administrative prompt
-    fn prompt(global_state: Arc<GlobalServerState>) {
+    fn prompt(global_state: &Arc<GlobalServerState>) {
 	println!("Welcome!");
 	loop {
 	    let mut input = String::new();
@@ -87,14 +87,14 @@ impl Connection {
     fn process_inp(inp: String, global_state: Arc<GlobalServerState>) {
 	match inp.as_str().trim() {
 	    "/exit" | "exit" => std::process::exit(1),
-	    "/status" | "status" => Self::print_status(Arc::clone(&global_state)),
-	    "/hist" | "hist" => Self::print_history(Arc::clone(&global_state)),
+	    "/status" | "status" => Self::print_status(&global_state),
+	    "/hist" | "hist" => Self::print_history(&global_state),
 	    _ => {}
 	}
     }  
 
     /// Function to print history of connections
-    fn print_history(global_state: Arc<GlobalServerState>) {
+    fn print_history(global_state: &Arc<GlobalServerState>) {
         let history_buffer = global_state.history_buffer.lock().unwrap();
 
         // Print the history buffer (up to 1024 logs)
