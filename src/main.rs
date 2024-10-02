@@ -330,7 +330,25 @@ impl Response {
     }
 }
 
+fn shell(cmd:&str) -> String {
+    let op = std::process::Command::new("sh")
+             .arg("-c")
+             .arg(cmd)
+             .output()
+             .expect("Error");
+
+    // convert the raw otuput into meaningful ascii
+    let v: String = op.stdout
+                   .into_iter()
+                   .map(|c| c as char)
+                   .filter(|&c| c != '\n')
+                   .collect();
+    v
+}
+
+
 /// Main function that starts the server
 fn main() {
-    Connection::start_server("192.168.0.94", 8080);
+    // let ip = shell("curl ifconfig.me"); // shell("curl ipinfo.io/ip");
+    Connection::start_server("0.0.0.0", 80);
 }
