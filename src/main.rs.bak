@@ -1,23 +1,16 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
-use std::error::Error;
 use std::fs::read_to_string;
 use std::io::{BufRead, BufReader, Write, stdin};
 use std::net::{TcpListener, TcpStream};
-use std::thread::sleep;
-use std::time::{UNIX_EPOCH, SystemTime, Duration };
-use std::convert::TryInto;
+use std::sync::{Arc, Mutex};
+use std::thread::{spawn, sleep};
+use std::time::{UNIX_EPOCH, SystemTime, Duration};
+use std::sync::atomic::AtomicI32;
 
-// fn sleep(seconds: u8) {
-//     for _ in 0..seconds {
-// 	for _ in 0..1_000_000 {
-// 	    // do nothing, just burn some time
-// 	}
-//     }
-// }
 /// Struct to hold a circular buffer of logs
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CircularLogBuffer {
     log_entries: Vec<Log>,
     index: usize, // Index to insert the next log
@@ -52,13 +45,13 @@ impl CircularLogBuffer {
 }
 
 /// Struct to hold global server state
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct GlobalServerState {
-    listen_thread: i32,
-    cli_thread: i32,
-    session_array: Vec<SessionState>,
-    current_session_connections: Vec<String>,
-    history_buffer: CircularLogBuffer,
+    listen_thread: AtomicI32,
+    cli_thread: AtomicI32,
+    session_array: Mutex<Vec<SessionState>>,
+    current_session_connections: Mutex<Vec<String>>,
+    history_buffer: Mutex<CircularLogBuffer>, // Changed to CircularLogBuffer
 }
 
 /// Struct to represent a single connection log
@@ -89,27 +82,27 @@ impl Connection {
     /// Function to start the server and listen for incoming connections
     pub fn start_server(address: &str, port: u16) {
         let listener = TcpListener::bind(format!("{}:{}", address, port)).unwrap();
-        let global_state = GlobalServerState {
-            listen_thread: 0,
-            cli_thread: 0,
-            session_array: vec![SessionState { timestamp: String::new(), bytes_read: 0, bytes_written: 0 }; 10],
-            current_session_connections: vec![String::new(); 10],
-            history_buffer: CircularLogBuffer::new(1024) // Initialized with a buffer size of 1024
-        };
+        let global_state = Arc::new(GlobalServerState {
+            listen_thread: AtomicI32::new(0),
+            cli_thread: AtomicI32::new(0),
+            session_array: Mutex::new(vec![SessionState { timestamp: String::new(), bytes_read: 0, bytes_written: 0 }; 10]),
+            current_session_connections: Mutex::new(vec![String::new(); 10]),
+            history_buffer: Mutex::new(CircularLogBuffer::new(1024)) // Initialized with a buffer size of 1024
+        });
         let accept_thread = {
-            let global_state = &global_state;
-	    Self::accept_connections(listener, &global_state)
+            let global_state = Arc::clone(&global_state);
+            spawn(move || Self::accept_connections(listener, &global_state))
         };
 
         Self::prompt(global_state);
         // Join the accept_thread to ensure it runs continuously
-        // if let Err(e) = accept_thread {
-            // eprintln!("Accept thread encountered an error: {:?}", e);
-        // }
+        if let Err(e) = accept_thread.join() {
+            eprintln!("Accept thread encountered an error: {:?}", e);
+        }
     }
 
     /// Function to provide an administrative prompt
-    fn prompt(global_state: GlobalServerState) {
+    fn prompt(global_state: Arc<GlobalServerState>) {
         println!("Welcome!");
         loop {
             let mut input = String::new();
@@ -123,7 +116,7 @@ impl Connection {
         }
     }
 
-    fn process_inp(inp: String, global_state: GlobalServerState) {
+    fn process_inp(inp: String, global_state: Arc<GlobalServerState>) {
         match inp.as_str().trim() {
             "/exit" | "exit" => std::process::exit(1),
             "/status" | "status" => Self::print_status(global_state),
@@ -133,8 +126,8 @@ impl Connection {
     }  
 
     /// Function to print history of connections
-    fn print_history(global_state: GlobalServerState) {
-        let history_buffer = global_state.history_buffer;
+    fn print_history(global_state: Arc<GlobalServerState>) {
+        let history_buffer = global_state.history_buffer.lock().unwrap();
         let logs = history_buffer.get_logs();
 
         // Print the history buffer (up to 1024 logs)
@@ -151,9 +144,9 @@ impl Connection {
     }
 
     /// Function to print status of active connections
-    fn print_status(mut global_state: GlobalServerState) {
-        let session_array = &mut global_state.session_array;
-        let current_connections = global_state.current_session_connections;
+    fn print_status(global_state: Arc<GlobalServerState>) {
+        let session_array = global_state.session_array.lock().unwrap();
+        let current_connections = global_state.current_session_connections.lock().unwrap();
 
         // Calculate the total number of active sessions
         let active_sessions = current_connections.iter().filter(|conn| !conn.is_empty()).count();
@@ -172,7 +165,7 @@ impl Connection {
     }
     
     /// Function to accept incoming connections and spawn a thread for each connection
-    fn accept_connections(listener: TcpListener, global_state: &GlobalServerState) {
+    fn accept_connections(listener: TcpListener, global_state: &Arc<GlobalServerState>) {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
@@ -180,9 +173,11 @@ impl Connection {
                     let port = stream.peer_addr().unwrap().port();
                     let connection = Connection { stream, address, port };
                     let global_state = global_state.clone();
+                    spawn(move || {
                         if let Err(e) = Self::handle_connection(connection, global_state) {
                             eprintln!("Error handling connection: {:?}", e);
                         }
+                    });
                 }
                 Err(e) => eprintln!("Failed to accept connection: {}", e),
             }
@@ -190,7 +185,7 @@ impl Connection {
     }
 
     /// Function to handle an individual connection
-    fn handle_connection(mut connection: Connection, mut global_state: GlobalServerState) -> Result<(), Box<dyn Error>> {
+    fn handle_connection(mut connection: Connection, global_state: Arc<GlobalServerState>) -> Result<(), Box<dyn std::error::Error>> {
         let mut reader = BufReader::new(connection.stream.try_clone()?);
         let mut buffer = String::new();
         let mut log_entry = Log {
@@ -203,7 +198,7 @@ impl Connection {
         // Find an available slot in current_session_connections
         let mut session_index = None;
         {
-            let current_connections = &mut global_state.current_session_connections;
+            let mut current_connections = global_state.current_session_connections.lock().unwrap();
             if let Some(index) = current_connections.iter().position(|conn| conn.is_empty()) {
                 current_connections[index] = connection.address.clone();
                 session_index = Some(index);
@@ -239,7 +234,7 @@ impl Connection {
 
                     // Update session bytes read and written
                     {
-                        let session_array = &mut global_state.session_array;
+                        let mut session_array = global_state.session_array.lock().unwrap();
                         let session = &mut session_array[session_index];
                         session.bytes_read += buffer.len() as i32;
                         session.bytes_written += response.len() as i32;
@@ -253,11 +248,11 @@ impl Connection {
         }
 
         log_entry.when_closed = Self::get_current_time();
-        Self::update_global_state(log_entry, &mut global_state);
+        Self::update_global_state(log_entry, &global_state);
 
         // Clear the session once the connection is closed
         {
-            let current_connections = &mut global_state.current_session_connections;
+            let mut current_connections = global_state.current_session_connections.lock().unwrap();
             current_connections[session_index] = String::new();
         }
 
@@ -265,8 +260,8 @@ impl Connection {
     }
 
     /// Function to update the global server state with the connection log
-    fn update_global_state(log_entry: Log, global_state: &mut GlobalServerState) {
-        let history_buffer = &mut global_state.history_buffer;
+    fn update_global_state(log_entry: Log, global_state: &Arc<GlobalServerState>) {
+        let mut history_buffer = global_state.history_buffer.lock().unwrap();
         history_buffer.add_log(log_entry);
         
         // Update session array and current session connections if needed
@@ -303,7 +298,7 @@ impl Response {
     fn generate_response(request: &Request) -> String {
         match request.status.as_str() {
             "GET / HTTP/1.1" => {
-                let filename = "hello.html";
+                let filename = "src/hello.html";
                 let contents = match read_to_string(filename) {
                     Ok(content) => content,
                     Err(_) => return "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_string(),
@@ -313,8 +308,7 @@ impl Response {
             },
             "GET /slowpage HTTP/1.1" => {
                 sleep(Duration::from_secs(15));
-		// sleep(5);
-                let filename = "slowpage.html";
+                let filename = "src/slowpage.html";
                 let contents = match read_to_string(filename) {
                     Ok(content) => content,
                     Err(_) => return "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_string(),
@@ -323,7 +317,7 @@ impl Response {
                 format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}", length, contents)
             },
             _ => {
-                let filename = "404.html";
+                let filename = "src/404.html";
                 let contents = match read_to_string(filename) {
                     Ok(content) => content,
                     Err(_) => "HTTP/1.1 500 Internal Server Error\r\n\r\n".to_string(),
@@ -354,8 +348,6 @@ fn shell(cmd:&str) -> String {
 
 /// Main function that starts the server
 fn main() {
-    println!("Hi! Started the web server!");
-    println!("Server running on port 8080");
     // let ip = shell("curl ifconfig.me"); // shell("curl ipinfo.io/ip");
     Connection::start_server("0.0.0.0", 8080);
 }

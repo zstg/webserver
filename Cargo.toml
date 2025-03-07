@@ -4,3 +4,12 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
+# cross = "0.2.5"
+
+#[[bin]]
+#name = "new"
+#path = "src/new.rs"
+
+[profile.release]
+lto = false  # Link-time optimization (optional, but reduces binary size)
+panic = 'abort'  # Ensures no runtime dependencies for unwinding
